@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>FPS semplice</title>
+<style>
+  body, html {
+    margin: 0; padding: 0; overflow: hidden; background: #222;
+    font-family: Arial, sans-serif; color: white; user-select:none;
+  }
+  #startScreen {
+    position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+    background: #111; display: flex; justify-content: center; align-items: center; flex-direction: column;
+  }
+  #startBtn {
+    font-size: 24px; padding: 15px 40px; cursor: pointer; border: none;
+    background: #28a745; color: white; border-radius: 10px;
+    transition: background 0.3s;
+  }
+  #startBtn:hover {
+    background: #218838;
+  }
+  #gameCanvas {
+    display: none;
+    background: #555;
+    width: 100vw;
+    height: 100vh;
+    cursor: crosshair;
+  }
+  #hud {
+    position: absolute;
+    top: 10px; left: 10px;
+    font-size: 18px;
+  }
+</style>
+</head>
+<body>
+
+<div id="startScreen">
+  <h1>FPS Semplice</h1>
+  <button id="startBtn">Avvia partita</button>
+</div>
+
+<canvas id="gameCanvas"></canvas>
+<div id="hud"></div>
+
+<script>
+(() => {
+  const startBtn = document.getElementById('startBtn');
+  const startScreen = document.getElementById('startScreen');
+  const canvas = document.getElementById('gameCanvas');
+  const ctx = canvas.getContext('2d');
+  const hud = document.getElementById('hud');
+
+  let width, height;
+  let player = { x: 0, y: 0, size: 20 };
+  let enemy = { x: 0, y: 0, size: 30, vx: 2, vy: 2, alive: true };
+  let bullets = [];
+  let score = 0;
+  let gameRunning = false;
+
+  function resize() {
+    width = window.innerWidth;
+    height = window.innerHeight;
+    canvas.width = width;
+    canvas.height = height;
+    player.x = width / 2;
+    player.y = height / 2;
+  }
+
+  function drawPlayer() {
+    ctx.fillStyle = 'cyan';
+    ctx.beginPath();
+    ctx.arc(player.x, player.y, player.size, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  function drawEnemy() {
+    if (!enemy.alive) return;
+    ctx.fillStyle = 'red';
+    ctx.beginPath();
+    ctx.arc(enemy.x, enemy.y, enemy.size, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  function drawBullets() {
+    ctx.fillStyle = 'yellow';
+    bullets.forEach(b => {
+      ctx.beginPath();
+      ctx.arc(b.x, b.y, 5, 0, Math.PI * 2);
+      ctx.fill();
+    });
+  }
+
+  function updateEnemy() {
+    if (!enemy.alive) return;
+    enemy.x += enemy.vx;
+    enemy.y += enemy.vy;
+    if (enemy.x < enemy.size || enemy.x > width - enemy.size) enemy.vx *= -1;
+    if (enemy.y < enemy.size || enemy.y > height - enemy.size) enemy.vy *= -1;
+  }
+
+  function updateBullets() {
+    bullets.forEach((b, i) => {
+      b.x += b.vx;
+      b.y += b.vy;
+      // Remove bullets out of screen
+      if (b.x < 0 || b.x > width || b.y < 0 || b.y > height) {
+        bullets.splice(i, 1);
+      } else if (enemy.alive) {
+        // Check collision bullet-enemy
+        const dx = b.x - enemy.x;
+        const dy = b.y - enemy.y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist < enemy.size + 5) {
+          enemy.alive = false;
+          bullets.splice(i, 1);
+          score++;
+          setTimeout(() => {
+            enemy.alive = true;
+            enemy.x = Math.random() * (width - enemy.size * 2) + enemy.size;
+            enemy.y = Math.random() * (height - enemy.size * 2) + enemy.size;
+            enemy.vx = (Math.random() < 0.5 ? -1 : 1) * (2 + Math.random()*2);
+            enemy.vy = (Math.random() < 0.5 ? -1 : 1) * (2 + Math.random()*2);
+          }, 2000);
+        }
+      }
+    });
+  }
+
+  function draw() {
+    ctx.clearRect(0, 0, width, height);
+    drawPlayer();
+    drawEnemy();
+    drawBullets();
+    hud.textContent = 'Nemici uccisi: ' + score;
+  }
+
+  function gameLoop() {
+    if (!gameRunning) return;
+    updateEnemy();
+    updateBullets();
+    draw();
+    requestAnimationFrame(gameLoop);
+  }
+
+  canvas.addEventListener('click', (e) => {
+    if (!gameRunning) return;
+    const angle = Math.atan2(e.clientY - player.y, e.clientX - player.x);
+    const speed = 10;
+    bullets.push({
+      x: player.x + Math.cos(angle) * player.size,
+      y: player.y + Math.sin(angle) * player.size,
+      vx: Math.cos(angle) * speed,
+      vy: Math.sin(angle) * speed,
+    });
+  });
+
+  startBtn.addEventListener('click', () => {
+    startScreen.style.display = 'none';
+    canvas.style.display = 'block';
+    gameRunning = true;
+    resize();
+    gameLoop();
+  });
+
+  window.addEventListener('resize', () => {
+    if (gameRunning) resize();
+  });
+})();
+</script>
+
+</body>
+</html>
