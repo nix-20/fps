@@ -1,0 +1,680 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>HyperArena — Mini FPS</title>
+<style>
+  :root{
+    --bg:#0b0d10;
+    --panel: rgba(10,10,12,0.75);
+    --accent: #ff6b6b;
+    --muted:#bfc6cc;
+    --hud: #e6eef8;
+  }
+  html,body{height:100%;margin:0;background:var(--bg);font-family:Inter,ui-sans-serif,system-ui,monospace;color:var(--hud);overflow:hidden}
+  canvas{display:block}
+  #ui{
+    position:fixed;left:10px;top:10px;z-index:40;
+    color:var(--hud);
+  }
+  #title{font-weight:700;font-size:18px;margin-bottom:6px}
+  #topbar{display:flex;gap:10px;align-items:center}
+  .panel{background:var(--panel);padding:8px;border-radius:8px;border:1px solid rgba(255,255,255,0.03)}
+  #hud {position:fixed;right:10px;top:10px;text-align:right;z-index:40}
+  #crosshair{
+    position:fixed;left:50%;top:50%;width:12px;height:12px;margin-left:-6px;margin-top:-6px;
+    pointer-events:none;z-index:30;
+  }
+  #crosshair:before,#crosshair:after{content:"";position:absolute;left:50%;top:50%;background:var(--accent);border-radius:2px}
+  #crosshair:before{width:2px;height:18px;margin-left:-1px;margin-top:-9px;opacity:.95;transform:translateZ(0)}
+  #crosshair:after{height:2px;width:18px;margin-left:-9px;margin-top:-1px;opacity:.95}
+  #menu{
+    position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);z-index:50;
+    width:min(720px,90%);text-align:center;
+  }
+  button{cursor:pointer;background:#0f1720;border:1px solid rgba(255,255,255,0.06);color:var(--hud);padding:10px 14px;border-radius:8px;font-weight:600}
+  #info{text-align:left;color:var(--muted);font-size:13px;margin-top:8px}
+  #log{position:fixed;left:10px;bottom:10px;z-index:40;max-width:40vw;display:flex;flex-direction:column;gap:6px}
+  .msg{background:rgba(0,0,0,0.45);padding:6px 8px;border-radius:6px;border:1px solid rgba(255,255,255,0.03);font-size:13px;color:var(--muted)}
+  #footer{position:fixed;right:10px;bottom:10px;color:var(--muted);font-size:12px}
+  /* responsive smaller UI */
+  @media (max-width:600px){
+    #hud{display:none}
+    #log{max-width:80vw}
+    #menu{width:96%}
+  }
+</style>
+</head>
+<body>
+<div id="ui" class="panel">
+  <div id="title">HyperArena Prototype</div>
+  <div id="topbar">
+    <div id="status">Stato: <strong id="gameState">MENU</strong></div>
+    <div style="width:10px"></div>
+    <div>Onada: <strong id="wave">0</strong></div>
+  </div>
+  <div id="info">WASD - mira con mouse (clic per sparo) - R respawn - Esc per uscire puntatore</div>
+</div>
+
+<div id="hud" class="panel">
+  <div>Vita: <strong id="health">100</strong></div>
+  <div>Arma: <strong id="weapon">Rifle</strong></div>
+  <div>Punteggio: <strong id="score">0</strong></div>
+  <div>Highscore: <strong id="highscore">0</strong></div>
+</div>
+
+<div id="crosshair"></div>
+
+<div id="menu" class="panel">
+  <h2 style="margin:4px 0 8px 0">HyperArena — Jank but Fun</h2>
+  <p style="color:var(--muted);margin:0 0 10px 0">Gioco FPS single-file. Ti affrontano ondate di nemici con IA base: cercano copertura, aggirano ostacoli e sparano.</p>
+  <div style="display:flex;gap:8px;justify-content:center;margin-bottom:10px">
+    <button id="startBtn">Avvia partita</button>
+    <button id="practiceBtn">Modalità pratica (onda infinita)</button>
+    <button id="resetHs">Reset Highscore</button>
+  </div>
+  <div style="color:var(--muted);font-size:13px">Suggerimento: cerca i box grigi per coprirti. Blocchi e ostacoli sono fisici.</div>
+</div>
+
+<div id="log"></div>
+<div id="footer">Salva locale — modifica liberamente</div>
+
+<script type="module">
+/*
+  HyperArena - single HTML FPS prototype
+  - Three.js (module) from CDN
+  - PointerLockControls
+  - Steering enemy AI: seek, avoid obstacles, seek cover (simple)
+  - Ranged enemies shoot projectiles
+  - Waves, particle FX, sounds via WebAudio
+  - Save highscore in localStorage
+*/
+
+import * as THREE from 'https://unpkg.com/three@0.152.2/build/three.module.js';
+import { PointerLockControls } from 'https://unpkg.com/three@0.152.2/examples/jsm/controls/PointerLockControls.js';
+
+/* ------------------------ Globals & UI ------------------------ */
+const container = document.body;
+const statusEl = document.getElementById('gameState');
+const waveEl = document.getElementById('wave');
+const healthEl = document.getElementById('health');
+const scoreEl = document.getElementById('score');
+const hsEl = document.getElementById('highscore');
+const weaponEl = document.getElementById('weapon');
+const logEl = document.getElementById('log');
+const menu = document.getElementById('menu');
+const startBtn = document.getElementById('startBtn');
+const practiceBtn = document.getElementById('practiceBtn');
+const resetHsBtn = document.getElementById('resetHs');
+
+let scene, camera, renderer, clock;
+let controls;
+let player = { health:100, score:0, weapon:'Rifle' };
+let enemies = [];
+let obstacles = [];
+let bullets = []; // player bullets (for visuals)
+let enemyProjectiles = [];
+let wave = 0;
+let running = false;
+let practice = false;
+let lastSpawnTime = 0;
+let waveConfig = { baseCount: 4, interval: 2000, betweenWaves: 3000 };
+const rng = (a,b)=> a + Math.random()*(b-a);
+
+/* ------------------------ Audio (WebAudio simple) ------------------------ */
+const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+function playShot(f=600, time=0){
+  const o = audioCtx.createOscillator();
+  const g = audioCtx.createGain();
+  o.type = 'sawtooth'; o.frequency.value = f;
+  g.gain.value = 0.08;
+  o.connect(g); g.connect(audioCtx.destination);
+  o.start(audioCtx.currentTime + time);
+  o.stop(audioCtx.currentTime + time + 0.08);
+}
+function playThud(){
+  const o = audioCtx.createOscillator();
+  const g = audioCtx.createGain();
+  o.type='triangle'; o.frequency.value=120;
+  g.gain.value=0.12;
+  const now = audioCtx.currentTime;
+  o.connect(g); g.connect(audioCtx.destination);
+  o.start(now); g.gain.exponentialRampToValueAtTime(0.001, now + 0.3); o.stop(now+0.4);
+}
+function playExplode(){
+  const o = audioCtx.createOscillator();
+  const g = audioCtx.createGain();
+  o.type='square'; o.frequency.value=120;
+  g.gain.value=0.12;
+  const now = audioCtx.currentTime;
+  o.connect(g); g.connect(audioCtx.destination);
+  o.start(now); g.gain.exponentialRampToValueAtTime(0.001, now + 0.5); o.stop(now+0.55);
+}
+
+/* ------------------------ Helpers ------------------------ */
+function logMsg(txt, ttl=3500){
+  const d = document.createElement('div'); d.className='msg'; d.textContent = txt; logEl.prepend(d);
+  setTimeout(()=> d.remove(), ttl);
+}
+function saveHighscore(){
+  const h = Number(localStorage.getItem('hyperarena_hs') || 0);
+  if(player.score > h) localStorage.setItem('hyperarena_hs', String(player.score));
+  hsEl.textContent = localStorage.getItem('hyperarena_hs') || 0;
+}
+resetHsBtn.onclick = ()=>{ localStorage.removeItem('hyperarena_hs'); hsEl.textContent='0'; logMsg('Highscore resettato') };
+
+/* ------------------------ Init scene ------------------------ */
+function init(){
+  scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x0b0d10);
+  camera = new THREE.PerspectiveCamera(75, innerWidth/innerHeight, 0.1, 1000);
+  clock = new THREE.Clock();
+
+  renderer = new THREE.WebGLRenderer({antialias:true});
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.setSize(innerWidth, innerHeight);
+  renderer.shadowMap.enabled = true;
+  container.appendChild(renderer.domElement);
+
+  // lights
+  const hemi = new THREE.HemisphereLight(0xffffff, 0x222233, 0.8);
+  scene.add(hemi);
+  const dir = new THREE.DirectionalLight(0xffffff, 0.8);
+  dir.position.set(10,20,10); dir.castShadow = true;
+  dir.shadow.mapSize.set(1024,1024);
+  scene.add(dir);
+
+  // floor
+  const floorMat = new THREE.MeshStandardMaterial({color:0x1a1d22, roughness:0.9, metalness:0.05});
+  const floor = new THREE.Mesh(new THREE.PlaneGeometry(240, 240), floorMat);
+  floor.rotation.x = -Math.PI/2; floor.receiveShadow = true;
+  scene.add(floor);
+
+  // decorative grid
+  const grid = new THREE.GridHelper(240, 240, 0x111214, 0x0d0f12);
+  scene.add(grid);
+
+  // obstacles (boxes acting as cover)
+  for(let i=0;i<18;i++){
+    const sx = rng(1.6,5), sz=rng(1.6,5), x=rng(-60,60), z=rng(-60,60);
+    const m = createBox(x, 0, z, sx, rng(1.2,3), sz, 0x555a66);
+    obstacles.push(m);
+  }
+
+  // arena border walls (visual)
+  const borderMat = new THREE.MeshStandardMaterial({color:0x222428});
+  const w1 = new THREE.Mesh(new THREE.BoxGeometry(240,8,2), borderMat); w1.position.set(0,4,-121); scene.add(w1);
+  const w2 = new THREE.Mesh(new THREE.BoxGeometry(240,8,2), borderMat); w2.position.set(0,4,121); scene.add(w2);
+  const w3 = new THREE.Mesh(new THREE.BoxGeometry(2,8,240), borderMat); w3.position.set(-121,4,0); scene.add(w3);
+  const w4 = new THREE.Mesh(new THREE.BoxGeometry(2,8,240), borderMat); w4.position.set(121,4,0); scene.add(w4);
+
+  // player start
+  camera.position.set(0,1.8,0);
+
+  // controls
+  controls = new PointerLockControls(camera, document.body);
+  controls.getObject().position.copy(camera.position);
+
+  // input handling
+  setupInput();
+
+  // window resize
+  window.addEventListener('resize', ()=>{ camera.aspect=innerWidth/innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth,innerHeight); });
+}
+
+/* ------------------------ Geometry factory ------------------------ */
+function createBox(x,y,z, sx,sy,sz, color=0x667788){
+  const geo = new THREE.BoxGeometry(sx,sy,sz);
+  const mat = new THREE.MeshStandardMaterial({color});
+  const m = new THREE.Mesh(geo, mat);
+  m.position.set(x, y+sy/2, z);
+  m.castShadow=true; m.receiveShadow=true;
+  scene.add(m);
+  return m;
+}
+function createEnemyMesh(type='melee'){
+  const g = new THREE.BoxGeometry(0.9,1.6,0.9);
+  const col = (type==='ranged')?0xaa9944:0xaa3344;
+  const m = new THREE.Mesh(g, new THREE.MeshStandardMaterial({color:col}));
+  m.castShadow=true; m.receiveShadow=true;
+  return m;
+}
+
+/* ------------------------ Input & PointerLock ------------------------ */
+let move = {forward:false,back:false,left:false,right:false,run:false};
+let canShoot = true;
+let mouseDown = false;
+let lastShot = 0;
+const keyMap = {KeyW:'forward',KeyS:'back',KeyA:'left',KeyD:'right',ShiftLeft:'run'};
+
+function setupInput(){
+  document.addEventListener('keydown', (e)=>{
+    if(keyMap[e.code]) move[keyMap[e.code]] = true;
+    if(e.code==='KeyR') respawn();
+  });
+  document.addEventListener('keyup', (e)=>{ if(keyMap[e.code]) move[keyMap[e.code]] = false; });
+
+  startBtn.addEventListener('click', ()=>{ startGame(false); });
+  practiceBtn.addEventListener('click', ()=>{ startGame(true); });
+
+  // pointer lock events
+  controls.addEventListener('lock', ()=>{ menu.style.display='none'; statusEl.textContent='GIOCO' });
+  controls.addEventListener('unlock', ()=>{ menu.style.display='block'; statusEl.textContent='MENU' });
+
+  // mouse
+  document.addEventListener('mousedown', (e)=>{
+    if(!controls.isLocked) return;
+    mouseDown = true;
+    shootPlayer();
+  });
+  document.addEventListener('mouseup', ()=>{ mouseDown=false; });
+
+  // continuous shooting if holding (auto-fire)
+  function fireLoop(){
+    if(controls.isLocked && mouseDown) shootPlayer();
+    requestAnimationFrame(fireLoop);
+  }
+  fireLoop();
+}
+
+/* ------------------------ Player shooting ------------------------ */
+function shootPlayer(){
+  const t = performance.now();
+  if(!canShoot) return;
+  if(t - lastShot < 120) return; // fire rate
+  lastShot = t;
+  playShot(900 + Math.random()*200);
+  // raycast
+  const origin = new THREE.Vector3().copy(camera.position);
+  const dir = new THREE.Vector3(); camera.getWorldDirection(dir);
+  const ray = new THREE.Raycaster(origin, dir, 0.5, 120);
+  // check enemies collisions
+  const hits = ray.intersectObjects(enemies.map(e=>e.mesh));
+  if(hits.length>0){
+    const hitMesh = hits[0].object;
+    const e = enemies.find(x=>x.mesh===hitMesh);
+    if(e){
+      e.hp -= 25;
+      spawnParticle(hits[0].point, 12, 0xffcc66);
+      if(e.hp <= 0) killEnemy(e);
+    }
+  }
+  spawnMuzzleFlash();
+}
+
+/* ------------------------ Spawn effects ------------------------ */
+function spawnMuzzleFlash(){
+  const flash = new THREE.Mesh(new THREE.SphereGeometry(0.06,8,8), new THREE.MeshBasicMaterial({color:0xffffcc}));
+  const pos = new THREE.Vector3().copy(camera.position).add(camera.getWorldDirection(new THREE.Vector3()).multiplyScalar(0.9));
+  flash.position.copy(pos); scene.add(flash);
+  setTimeout(()=> scene.remove(flash), 90);
+}
+function spawnParticle(pos, n=16, color=0xff4444){
+  for(let i=0;i<n;i++){
+    const p = {
+      mesh: new THREE.Mesh(new THREE.SphereGeometry(0.04,6,6), new THREE.MeshBasicMaterial({color})),
+      vel: new THREE.Vector3((Math.random()-0.5)*3, Math.random()*2, (Math.random()-0.5)*3),
+      life: 0.6 + Math.random()*0.4
+    };
+    p.mesh.position.copy(pos);
+    scene.add(p.mesh);
+    bullets.push(p);
+  }
+}
+
+/* ------------------------ Enemy logic ------------------------ */
+function spawnEnemy(type='melee', pos=null){
+  const e = { type, hp:(type==='ranged'?35:50), mesh:createEnemyMesh(type), speed:(type==='ranged'?1.4:2.0), state:'idle', targetPos:null, shootCooldown:0 };
+  if(!pos){
+    const r= rng(20,60); const a=Math.random()*Math.PI*2;
+    pos = new THREE.Vector3(Math.cos(a)*r, 0.8, Math.sin(a)*r);
+  }
+  e.mesh.position.copy(pos);
+  enemies.push(e);
+}
+
+function killEnemy(e){
+  playExplode();
+  spawnParticle(e.mesh.position.clone(), 26, 0xff8844);
+  scene.remove(e.mesh);
+  const idx = enemies.indexOf(e); if(idx>=0) enemies.splice(idx,1);
+  player.score += 12;
+  scoreEl.textContent = player.score;
+  saveHighscore();
+}
+
+/* Line-of-sight check: return true if player visible from position (no obstacles blocking) */
+function hasLineOfSight(fromPos, toPos){
+  const dir = new THREE.Vector3().subVectors(toPos, fromPos).normalize();
+  const dist = fromPos.distanceTo(toPos);
+  const ray = new THREE.Raycaster(fromPos, dir, 0.1, dist-0.5);
+  const hits = ray.intersectObjects(obstacles, true);
+  return hits.length === 0;
+}
+
+/* Find nearest cover (obstacle) that blocks LOS from player */
+function findCoverForEnemy(e){
+  let best = null; let bestDist = 1e9;
+  for(const obs of obstacles){
+    // take a point near obstacle perimeter
+    const candidate = obs.position.clone();
+    const dirToPlayer = new THREE.Vector3().subVectors(camera.position, candidate).normalize();
+    // position behind obstacle relative to player
+    candidate.add(dirToPlayer.multiplyScalar(- (obs.geometry.parameters.depth || 2) - 1.2));
+    const d = candidate.distanceTo(e.mesh.position);
+    // check if this candidate blocks LOS to player
+    if(!hasLineOfSight(candidate, camera.position) && d < bestDist){
+      best = candidate.clone(); bestDist = d;
+    }
+  }
+  return best;
+}
+
+/* Enemy update per frame */
+function updateEnemies(dt){
+  for(const e of enemies){
+    // simple state machine: idle -> seek -> attack -> seek cover
+    const pos = e.mesh.position;
+    const toPlayer = new THREE.Vector3().subVectors(camera.position, pos);
+    const dist = toPlayer.length();
+    // sense range
+    const sense = 80;
+    if(dist < sense && hasLineOfSight(pos.clone().add(new THREE.Vector3(0,0.5,0)), camera.position)){
+      // can see player
+      if(e.type==='melee'){
+        // melee: close quickly
+        if(dist > 2.2){
+          // seek with obstacle avoidance: steering towards player but avoid obstacles
+          const steer = obstacleAvoidance(e, toPlayer.normalize()).multiplyScalar(e.speed);
+          e.mesh.position.addScaledVector(steer, dt);
+        } else {
+          // attack player directly
+          if(e._lastAttack === undefined || performance.now() - e._lastAttack > 800){
+            playerDamage(15);
+            e._lastAttack = performance.now();
+            playThud();
+            // slight knockback
+            e.mesh.position.add(new THREE.Vector3().copy(toPlayer).normalize().multiplyScalar(-1.2));
+          }
+        }
+      } else {
+        // ranged: keep distance, shoot occasionally
+        if(dist > 18){
+          // approach
+          e.mesh.position.addScaledVector(toPlayer.normalize(), e.speed*dt);
+        } else if(dist < 8){
+          // back off
+          e.mesh.position.addScaledVector(toPlayer.normalize().multiplyScalar(-1), e.speed*dt);
+        }
+        // shooting
+        e.shootCooldown -= dt*1000;
+        if(e.shootCooldown <= 0 && hasLineOfSight(e.mesh.position, camera.position)){
+          e.shootCooldown = 1000 + Math.random()*700;
+          enemyShoot(e);
+        }
+      }
+    } else {
+      // can't see player: wander or seek cover
+      if(!e._wanderTarget || e.mesh.position.distanceTo(e._wanderTarget) < 1.2){
+        e._wanderTarget = new THREE.Vector3(rng(-40,40), 0.8, rng(-40,40));
+      }
+      // occasional decision to seek better cover
+      if(Math.random() < 0.002){
+        const cover = findCoverForEnemy(e);
+        if(cover) e._wanderTarget = cover;
+      }
+      // move toward wander target
+      const toT = new THREE.Vector3().subVectors(e._wanderTarget, e.mesh.position);
+      e.mesh.position.addScaledVector(toT.normalize(), e.speed*0.6 * dt);
+    }
+
+    // simple collision with obstacles: slide around
+    for(const obs of obstacles){
+      const overlap = boundingBoxOverlap(e.mesh, obs);
+      if(overlap){
+        e.mesh.position.add(overlap.multiplyScalar(1.05));
+      }
+    }
+
+    // keep y
+    e.mesh.position.y = 0.8;
+    // rotate to face movement / player
+    const lookAt = (dist<30) ? camera.position : (e._wanderTarget || new THREE.Vector3(0,0,0));
+    e.mesh.lookAt(lookAt);
+  }
+}
+
+/* Obstacle avoidance steering */
+function obstacleAvoidance(enemy, desiredDir){
+  // sample a few rays in front
+  const origin = enemy.mesh.position.clone().add(new THREE.Vector3(0,0.6,0));
+  const ahead = origin.clone().add(desiredDir.clone().multiplyScalar(2.2));
+  const ray = new THREE.Raycaster(origin, desiredDir, 0.2, 2.8);
+  const hits = ray.intersectObjects(obstacles);
+  if(hits.length>0){
+    // compute avoidance vector: steer perpendicular to obstacle normal
+    const hit = hits[0];
+    const avoid = new THREE.Vector3().subVectors(origin, hit.point).normalize();
+    return desiredDir.clone().add(avoid.multiplyScalar(1.8)).normalize();
+  }
+  return desiredDir.clone();
+}
+
+/* Bounding box overlap push vector */
+function boundingBoxOverlap(a, b){
+  // a,b are meshes; compute overlap vector to push a out of b
+  const boxA = new THREE.Box3().setFromObject(a);
+  const boxB = new THREE.Box3().setFromObject(b);
+  if(!boxA.intersectsBox(boxB)) return null;
+  // compute minimal push vector
+  const centerA = boxA.getCenter(new THREE.Vector3());
+  const centerB = boxB.getCenter(new THREE.Vector3());
+  const dir = new THREE.Vector3().subVectors(centerA, centerB);
+  dir.y = 0;
+  if(dir.length() === 0) dir.x = 0.1;
+  return dir.normalize().multiplyScalar(0.6);
+}
+
+/* Enemy shooting: spawn a projectile that moves toward player */
+function enemyShoot(e){
+  playShot(480 + Math.random()*180);
+  const proj = {
+    pos: e.mesh.position.clone().add(new THREE.Vector3(0,0.8,0)),
+    vel: new THREE.Vector3().subVectors(camera.position, e.mesh.position).normalize().multiplyScalar(30),
+    life: 2.5,
+    mesh: new THREE.Mesh(new THREE.SphereGeometry(0.09,8,8), new THREE.MeshStandardMaterial({color:0xffcc88}))
+  };
+  proj.mesh.position.copy(proj.pos);
+  scene.add(proj.mesh);
+  enemyProjectiles.push(proj);
+}
+
+/* Update enemy projectiles */
+function updateEnemyProjectiles(dt){
+  for(let i = enemyProjectiles.length-1; i>=0; i--){
+    const p = enemyProjectiles[i];
+    p.pos.addScaledVector(p.vel, dt);
+    p.mesh.position.copy(p.pos);
+    p.life -= dt;
+    // collide with obstacles -> remove + small effect
+    const hits = new THREE.Raycaster(p.pos, p.vel.clone().normalize(), 0, 0.2).intersectObjects(obstacles);
+    if(hits.length>0){ spawnParticle(p.pos.clone(),8,0xffbb66); scene.remove(p.mesh); enemyProjectiles.splice(i,1); continue; }
+    // hit player?
+    if(p.pos.distanceTo(camera.position) < 1.0){
+      playerDamage(12);
+      spawnParticle(p.pos.clone(),10,0xff6666);
+      scene.remove(p.mesh);
+      enemyProjectiles.splice(i,1);
+      continue;
+    }
+    if(p.life <= 0){ scene.remove(p.mesh); enemyProjectiles.splice(i,1); }
+  }
+}
+
+/* ------------------------ Player damage & death ------------------------ */
+function playerDamage(amount){
+  player.health -= amount;
+  if(player.health < 0) player.health = 0;
+  healthEl.textContent = Math.round(player.health);
+  if(player.health === 0) onPlayerDead();
+}
+
+/* Player death handling */
+function onPlayerDead(){
+  playExplode();
+  controls.unlock();
+  statusEl.textContent = 'MORTO';
+  menu.style.display = 'block';
+  menu.querySelector('h2').textContent = 'Sei morto — punteggio: ' + player.score;
+  const btn = document.createElement('button'); btn.textContent='Respawn'; btn.onclick = ()=>{ respawn(); controls.lock(); };
+  const p = document.createElement('p'); p.style.color='var(--muted)'; p.style.marginTop='8px'; p.textContent='Premi R per respawn immediato';
+  // clear old controls area and insert respawn
+  const div = document.createElement('div'); div.style.marginTop='10px'; div.appendChild(btn); div.appendChild(p);
+  // remove other buttons
+  menu.innerHTML = ''; menu.appendChild(document.createElement('h2')).textContent = 'Sei morto'; menu.appendChild(div);
+  saveHighscore();
+}
+
+/* Respawn */
+function respawn(){
+  // clear enemies
+  for(const e of enemies) scene.remove(e.mesh);
+  enemies.length = 0;
+  for(const p of enemyProjectiles) scene.remove(p.mesh);
+  enemyProjectiles.length = 0;
+  player.health = 100; player.score = 0;
+  healthEl.textContent='100'; scoreEl.textContent='0';
+  camera.position.set(0,1.8,0); controls.getObject().position.copy(camera.position);
+  wave = 0; waveEl.textContent='0';
+  // reset menu UI
+  menu.innerHTML = `
+    <h2 style="margin:4px 0 8px 0">HyperArena — Jank but Fun</h2>
+    <p style="color:var(--muted);margin:0 0 10px 0">Gioco FPS single-file. Ti affrontano ondate di nemici con IA base: cercano copertura, aggirano ostacoli e sparano.</p>
+    <div style="display:flex;gap:8px;justify-content:center;margin-bottom:10px">
+      <button id="startBtn2">Avvia partita</button>
+      <button id="practiceBtn2">Modalità pratica (onda infinita)</button>
+      <button id="resetHs2">Reset Highscore</button>
+    </div>
+    <div style="color:var(--muted);font-size:13px">Suggerimento: cerca i box grigi per coprirti. Blocchi e ostacoli sono fisici.</div>
+  `;
+  document.getElementById('startBtn2').onclick = ()=>{ startGame(false); };
+  document.getElementById('practiceBtn2').onclick = ()=>{ startGame(true); };
+  document.getElementById('resetHs2').onclick = ()=>{ localStorage.removeItem('hyperarena_hs'); hsEl.textContent='0'; logMsg('Highscore resettato') };
+}
+
+/* ------------------------ Waves & Spawning ------------------------ */
+function startGame(isPractice=false){
+  practice = isPractice;
+  if(audioCtx.state === 'suspended') audioCtx.resume();
+  menu.style.display = 'none';
+  controls.lock();
+  running = true;
+  player.health = 100; player.score = 0;
+  scoreEl.textContent='0'; healthEl.textContent='100';
+  wave = 0;
+  lastSpawnTime = 0;
+  spawnWave();
+}
+
+function spawnWave(){
+  wave++;
+  waveEl.textContent = wave;
+  logMsg('Ondata ' + wave + ' in arrivo');
+  // spawn formula: base + wave*scale
+  const total = Math.min(40, waveConfig.baseCount + Math.floor(wave * 1.4));
+  let spawned = 0;
+  const start = performance.now();
+  const spawnInterval = Math.max(600, waveConfig.interval - Math.min(1200, wave*30));
+  const spawnTimer = setInterval(()=>{
+    if(spawned >= total) { clearInterval(spawnTimer); if(!practice) setTimeout(spawnWave, waveConfig.betweenWaves); return; }
+    // type selection
+    const t = Math.random() < Math.min(0.2, wave*0.02) ? 'ranged' : (Math.random()<0.12? 'ranged' : (Math.random()<0.18? 'melee_fast' : 'melee'));
+    if(t==='melee_fast') {
+      spawnEnemy('melee', null); enemies[enemies.length-1].speed *= 1.6; enemies[enemies.length-1].hp *= 0.8;
+    } else spawnEnemy(t==='ranged'?'ranged':'melee', null);
+    spawned++;
+  }, spawnInterval);
+}
+
+/* ------------------------ Update loop ------------------------ */
+let prev = performance.now();
+function animate(){
+  const now = performance.now();
+  const dt = Math.min(0.05, (now - prev)/1000);
+  prev = now;
+
+  // player movement
+  updatePlayerMovement(dt);
+
+  // enemies
+  updateEnemies(dt);
+
+  // projectiles
+  updateEnemyProjectiles(dt);
+
+  // bullets (particles) lifetime update
+  for(let i=bullets.length-1;i>=0;i--){
+    const b = bullets[i];
+    b.life -= dt;
+    b.mesh.position.addScaledVector(b.vel, dt);
+    if(b.life <= 0){ scene.remove(b.mesh); bullets.splice(i,1); }
+  }
+
+  // simple camera bob / sway
+  renderer.render(scene, camera);
+
+  requestAnimationFrame(animate);
+}
+
+/* Player movement physics */
+let velocity = new THREE.Vector3();
+function updatePlayerMovement(dt){
+  const speed = move.run ? 12 : 6;
+  const dir = new THREE.Vector3();
+  if(move.forward) dir.z -= 1;
+  if(move.back) dir.z += 1;
+  if(move.left) dir.x -= 1;
+  if(move.right) dir.x += 1;
+  dir.normalize();
+  // translate dir to world space
+  const camDir = new THREE.Vector3(); camera.getWorldDirection(camDir); camDir.y = 0; camDir.normalize();
+  const camRight = new THREE.Vector3().crossVectors(new THREE.Vector3(0,1,0), camDir).normalize();
+  const desired = new THREE.Vector3().addScaledVector(camDir, dir.z).addScaledVector(camRight, dir.x).normalize();
+  if(!isNaN(desired.x)){
+    velocity.addScaledVector(desired, speed * dt * 8);
+  }
+  // damping
+  velocity.multiplyScalar(0.82);
+  // move
+  controls.moveRight(velocity.x * dt);
+  controls.moveForward(velocity.z * dt);
+  // keep y
+  controls.getObject().position.y = 1.8;
+}
+
+/* ------------------------ Utility & boot ------------------------ */
+function kickstart(){
+  init();
+  // load highscore
+  hsEl.textContent = localStorage.getItem('hyperarena_hs') || 0;
+  // small starter enemies
+  for(let i=0;i<3;i++) spawnEnemy(Math.random()<0.3?'ranged':'melee');
+  prev = performance.now();
+  animate();
+  logMsg('Pronto. Premi Avvia per iniziare.');
+}
+kickstart();
+
+/* ------------------------ Misc. cleanup & helpers ------------------------ */
+// enemy array safety
+setInterval(()=>{ // cleanup dead meshes if any residual
+  for(let i=enemies.length-1;i>=0;i--) if(!enemies[i].mesh.parent) enemies.splice(i,1);
+}, 3000);
+
+// ensure audio context resumes on first user gesture
+document.addEventListener('click', ()=>{ if(audioCtx.state === 'suspended') audioCtx.resume(); }, {once:true});
+
+</script>
+</body>
+</html>
